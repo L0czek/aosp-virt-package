@@ -1,0 +1,82 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+rust_bindgen {
+    name: "libavf_bindgen",
+    wrapper_src: "include/android/virtualization.h",
+    crate_name: "avf_bindgen",
+    defaults: ["avf_build_flags_rust"],
+    source_stem: "bindings",
+    bindgen_flags: ["--default-enum-style rust"],
+    apex_available: ["com.android.virt"],
+    visibility: [
+        "//packages/modules/Virtualization/tests/vts",
+        "//packages/modules/Virtualization/tests/old_images_avf_test",
+    ],
+}
+
+rust_defaults {
+    name: "libavf.default",
+    crate_name: "avf",
+    defaults: ["avf_build_flags_rust"],
+    srcs: ["src/lib.rs"],
+    edition: "2021",
+    rustlibs: [
+        "libvmclient",
+        "android.system.virtualizationcommon-rust",
+        "android.system.virtualizationservice-rust",
+        "libavf_bindgen",
+        "libbinder_rs",
+        "liblibc",
+        "liblog_rust",
+        "librpcbinder_rs",
+    ],
+    apex_available: ["com.android.virt"],
+}
+
+rust_ffi_static {
+    name: "libavf_impl",
+    defaults: ["libavf.default"],
+}
+
+soong_config_module_type {
+    name: "virt_cc_defaults",
+    module_type: "cc_defaults",
+    config_namespace: "ANDROID",
+    bool_variables: [
+        "avf_enabled",
+    ],
+    properties: [
+        "apex_available",
+    ],
+}
+
+virt_cc_defaults {
+    name: "libavf_apex_available_defaults",
+    soong_config_variables: {
+        avf_enabled: {
+            apex_available: ["com.android.virt"],
+        },
+    },
+}
+
+cc_library {
+    name: "libavf",
+    defaults: ["libavf_apex_available_defaults"],
+    llndk: {
+        symbol_file: "libavf.map.txt",
+        moved_to_apex: true,
+    },
+    whole_static_libs: ["libavf_impl"],
+    shared_libs: [
+        "libbinder_ndk",
+        "libbinder_rpc_unstable",
+        "liblog",
+    ],
+    export_include_dirs: ["include"],
+    version_script: "libavf.map.txt",
+    stubs: {
+        symbol_file: "libavf.map.txt",
+    },
+}

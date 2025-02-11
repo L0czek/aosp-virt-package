@@ -1,0 +1,36 @@
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+prebuilt_etc {
+    name: "trusty_security_vm_launcher.rc",
+    src: select((os(), arch(), soong_config_variable("trusty_system_vm", "enabled")), {
+        ("android", "arm64", true): "security_vm_launcher-arm64.rc",
+        ("android", "x86_64", true): "security_vm_launcher-x86_64.rc",
+        (default, default, default): ":empty_file",
+    }),
+    filename: "trusty_security_vm_launcher.rc",
+    relative_install_path: "init",
+    system_ext_specific: true,
+}
+
+rust_binary {
+    name: "trusty_security_vm_launcher",
+    crate_name: "trusty_security_vm_launcher",
+    srcs: ["src/main.rs"],
+    edition: "2021",
+    prefer_rlib: true,
+    rustlibs: [
+        "android.system.virtualizationservice-rust",
+        "libanyhow",
+        "libclap",
+        "libvmclient",
+    ],
+    bootstrap: true,
+    apex_available: ["//apex_available:platform"],
+    system_ext_specific: true,
+    enabled: select(soong_config_variable("trusty_system_vm", "enabled"), {
+        true: true,
+        default: false,
+    }),
+}
