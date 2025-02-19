@@ -20,6 +20,7 @@ mod composite;
 mod crosvm;
 mod debug_config;
 mod dt_overlay;
+mod config;
 mod payload;
 mod selinux;
 

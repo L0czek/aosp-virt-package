@@ -16,13 +16,12 @@
 
 use crate::aidl::{remove_temporary_files, Cid, GLOBAL_SERVICE, VirtualMachineCallbacks};
 use crate::atom::{get_num_cpus, write_vm_exited_stats_sync};
-use crate::debug_config::DebugConfig;
 use anyhow::{anyhow, bail, Context, Error, Result};
 use binder::ParcelFileDescriptor;
 use command_fds::CommandFdExt;
 use libc::{sysconf, _SC_CLK_TCK};
 use log::{debug, error, info};
-use semver::{Version, VersionReq};
+use semver::Version;
 use nix::{fcntl::OFlag, unistd::pipe2, unistd::Uid, unistd::User};
 use regex::{Captures, Regex};
 use rustutils::system_properties;
@@ -33,7 +32,6 @@ use std::fmt;
 use std::fs::{read_to_string, File};
 use std::io::{self, Read};
 use std::mem;
-use std::num::{NonZeroU16, NonZeroU32};
 use std::os::unix::io::{AsRawFd, OwnedFd};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
@@ -42,19 +40,13 @@ use std::sync::{Arc, Condvar, Mutex, LazyLock};
 use std::time::{Duration, SystemTime};
 use std::thread::{self, JoinHandle};
 use android_system_virtualizationcommon::aidl::android::system::virtualizationcommon::DeathReason::DeathReason;
-use android_system_virtualizationservice::aidl::android::system::virtualizationservice::{
-    VirtualMachineAppConfig::DebugLevel::DebugLevel,
-    AudioConfig::AudioConfig as AudioConfigParcelable,
-    DisplayConfig::DisplayConfig as DisplayConfigParcelable,
-    GpuConfig::GpuConfig as GpuConfigParcelable,
-    UsbConfig::UsbConfig as UsbConfigParcelable,
-};
 use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IGlobalVmContext::IGlobalVmContext;
-use android_system_virtualizationservice_internal::aidl::android::system::virtualizationservice_internal::IBoundDevice::IBoundDevice;
 use binder::Strong;
 use android_system_virtualmachineservice::aidl::android::system::virtualmachineservice::IVirtualMachineService::IVirtualMachineService;
 use tombstoned_client::{TombstonedConnection, DebuggerdDumpType};
 use rpcbinder::RpcServer;
+pub use crate::config::*;
+use android_system_virtualizationservice::aidl::android::system::virtualizationservice::VirtualMachineAppConfig::DebugLevel::DebugLevel;
 
 /// external/crosvm
 use vm_control::{BalloonControlCommand, VmRequest, VmResponse};
@@ -98,179 +90,6 @@ static BOOT_HANGUP_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| {
         Duration::from_secs(30)
     }
 });
-
-/// Configuration for a VM to run with crosvm.
-#[derive(Debug)]
-pub struct CrosvmConfig {
-    pub cid: Cid,
-    pub name: String,
-    pub bootloader: Option<File>,
-    pub kernel: Option<File>,
-    pub initrd: Option<File>,
-    pub disks: Vec<DiskFile>,
-    pub params: Option<String>,
-    pub protected: bool,
-    pub debug_config: DebugConfig,
-    pub memory_mib: NonZeroU32,
-    pub cpus: Option<NonZeroU32>,
-    pub host_cpu_topology: bool,
-    pub console_out_fd: Option<File>,
-    pub console_in_fd: Option<File>,
-    pub log_fd: Option<File>,
-    pub ramdump: Option<File>,
-    pub indirect_files: Vec<File>,
-    pub platform_version: VersionReq,
-    pub detect_hangup: bool,
-    pub gdb_port: Option<NonZeroU16>,
-    pub vfio_devices: Vec<VfioDevice>,
-    pub dtbo: Option<File>,
-    pub device_tree_overlay: Option<File>,
-    pub display_config: Option<DisplayConfig>,
-    pub input_device_options: Vec<InputDeviceOption>,
-    pub hugepages: bool,
-    pub tap: Option<File>,
-    pub console_input_device: Option<String>,
-    pub boost_uclamp: bool,
-    pub gpu_config: Option<GpuConfig>,
-    pub audio_config: Option<AudioConfig>,
-    pub no_balloon: bool,
-    pub usb_config: UsbConfig,
-}
-
-#[derive(Debug)]
-pub struct AudioConfig {
-    pub use_microphone: bool,
-    pub use_speaker: bool,
-}
-
-impl AudioConfig {
-    pub fn new(raw_config: &AudioConfigParcelable) -> Self {
-        AudioConfig { use_microphone: raw_config.useMicrophone, use_speaker: raw_config.useSpeaker }
-    }
-}
-
-#[derive(Debug)]
-pub struct UsbConfig {
-    pub controller: bool,
-}
-
-impl UsbConfig {
-    pub fn new(raw_config: &UsbConfigParcelable) -> Result<UsbConfig> {
-        Ok(UsbConfig { controller: raw_config.controller })
-    }
-}
-
-#[derive(Debug)]
-pub struct DisplayConfig {
-    pub width: NonZeroU32,
-    pub height: NonZeroU32,
-    pub horizontal_dpi: NonZeroU32,
-    pub vertical_dpi: NonZeroU32,
-    pub refresh_rate: NonZeroU32,
-}
-
-impl DisplayConfig {
-    pub fn new(raw_config: &DisplayConfigParcelable) -> Result<DisplayConfig> {
-        let width = try_into_non_zero_u32(raw_config.width)?;
-        let height = try_into_non_zero_u32(raw_config.height)?;
-        let horizontal_dpi = try_into_non_zero_u32(raw_config.horizontalDpi)?;
-        let vertical_dpi = try_into_non_zero_u32(raw_config.verticalDpi)?;
-        let refresh_rate = try_into_non_zero_u32(raw_config.refreshRate)?;
-        Ok(DisplayConfig { width, height, horizontal_dpi, vertical_dpi, refresh_rate })
-    }
-}
-
-#[derive(Debug)]
-pub struct GpuConfig {
-    pub backend: Option<String>,
-    pub context_types: Option<Vec<String>>,
-    pub pci_address: Option<String>,
-    pub renderer_features: Option<String>,
-    pub renderer_use_egl: Option<bool>,
-    pub renderer_use_gles: Option<bool>,
-    pub renderer_use_glx: Option<bool>,
-    pub renderer_use_surfaceless: Option<bool>,
-    pub renderer_use_vulkan: Option<bool>,
-}
-
-impl GpuConfig {
-    pub fn new(raw_config: &GpuConfigParcelable) -> Result<GpuConfig> {
-        Ok(GpuConfig {
-            backend: raw_config.backend.clone(),
-            context_types: raw_config.contextTypes.clone().map(|context_types| {
-                context_types.iter().filter_map(|context_type| context_type.clone()).collect()
-            }),
-            pci_address: raw_config.pciAddress.clone(),
-            renderer_features: raw_config.rendererFeatures.clone(),
-            renderer_use_egl: Some(raw_config.rendererUseEgl),
-            renderer_use_gles: Some(raw_config.rendererUseGles),
-            renderer_use_glx: Some(raw_config.rendererUseGlx),
-            renderer_use_surfaceless: Some(raw_config.rendererUseSurfaceless),
-            renderer_use_vulkan: Some(raw_config.rendererUseVulkan),
-        })
-    }
-}
-
-fn try_into_non_zero_u32(value: i32) -> Result<NonZeroU32> {
-    let u32_value = value.try_into()?;
-    NonZeroU32::new(u32_value).ok_or(anyhow!("value should be greater than 0"))
-}
-
-/// A disk image to pass to crosvm for a VM.
-#[derive(Debug)]
-pub struct DiskFile {
-    pub image: File,
-    pub writable: bool,
-}
-
-/// virtio-input device configuration from `external/crosvm/src/crosvm/config.rs`
-#[derive(Debug)]
-#[allow(dead_code)]
-pub enum InputDeviceOption {
-    EvDev(File),
-    SingleTouch { file: File, width: u32, height: u32, name: Option<String> },
-    Keyboard(File),
-    Mouse(File),
-    Switches(File),
-    MultiTouchTrackpad { file: File, width: u32, height: u32, name: Option<String> },
-    MultiTouch { file: File, width: u32, height: u32, name: Option<String> },
-}
-
-type VfioDevice = Strong<dyn IBoundDevice>;
-
-/// The lifecycle state which the payload in the VM has reported itself to be in.
-///
-/// Note that the order of enum variants is significant; only forward transitions are allowed by
-/// [`VmInstance::update_payload_state`].
-#[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum PayloadState {
-    Starting,
-    Started,
-    Ready,
-    Finished,
-    Hangup, // Hasn't reached to Ready before timeout expires
-}
-
-/// The current state of the VM itself.
-#[derive(Debug)]
-pub enum VmState {
-    /// The VM has not yet tried to start.
-    NotStarted {
-        ///The configuration needed to start the VM, if it has not yet been started.
-        config: Box<CrosvmConfig>,
-    },
-    /// The VM has been started.
-    Running {
-        /// The crosvm child process.
-        child: Arc<SharedChild>,
-        /// The thread waiting for crosvm to finish.
-        monitor_vm_exit_thread: Option<JoinHandle<()>>,
-    },
-    /// The VM died or was killed.
-    Dead,
-    /// The VM failed to start.
-    Failed,
-}
 
 /// RSS values of VM and CrosVM process itself.
 #[derive(Copy, Clone, Debug, Default)]
